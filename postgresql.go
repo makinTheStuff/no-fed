@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/fiatjaf/relayer"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 )
@@ -9,6 +8,7 @@ import (
 func initDB(dburl string) (*sqlx.DB, error) {
 	db, err := sqlx.Connect("postgres", dburl)
 	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to connect to database")
 		return nil, err
 	}
 
@@ -48,7 +48,8 @@ CREATE INDEX IF NOT EXISTS cachedeventorder ON cache (time);
 -- TODO: map of actual nostr pubkeys to relays and of nostr event ids to relays
     `)
 	if err != nil {
-		relayer.Log.Print(err)
+		log.Fatal().Err(err).Msg("Failed to execute database setup")
+		return nil, err
 	}
 	return db, nil
 }

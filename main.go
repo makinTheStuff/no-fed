@@ -2,11 +2,8 @@ package main
 
 import (
 	"crypto/rsa"
-	"fmt"
-	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/fiatjaf/litepub"
 	"github.com/fiatjaf/relayer"
@@ -29,6 +26,26 @@ type Settings struct {
 	PublicKeyPEM string
 }
 
+func (s *Settings) generateKeys() (err error) {
+	// key stuff (needed for the activitypub integration)
+	var seed [4]byte
+	copy(seed[:], []byte(s.Secret))
+
+	if s.PrivateKey, err = litepub.GeneratePrivateKey(seed); err != nil {
+		log.Fatal().Err(err).Msg("error deriving private key")
+		return err
+	}
+	if s.PublicKeyPEM, err = litepub.PublicKeyToPEM(&s.PrivateKey.PublicKey); err != nil {
+		log.Fatal().Err(err).Msg("error deriving public key")
+		return err
+	}
+	return nil
+}
+
+func (s *Settings) setRelayUrl() {
+	s.RelayURL = strings.Replace(s.ServiceURL, "http", "ws", 1)
+}
+
 var (
 	s   Settings
 	pg  *sqlx.DB
@@ -36,64 +53,25 @@ var (
 )
 
 func main() {
-	err := envconfig.Process("", &s)
-	if err != nil {
-		log.Fatal().Err(err).Msg("couldn't process envconfig.")
-		return
-	}
-
-	s.RelayURL = strings.Replace(s.ServiceURL, "http", "ws", 1)
-
-	// key stuff (needed for the activitypub integration)
-	var seed [4]byte
-	copy(seed[:], []byte(s.Secret))
-	s.PrivateKey, err = litepub.GeneratePrivateKey(seed)
-	if err != nil {
-		log.Fatal().Err(err).Msg("error deriving private key")
-		return
-	}
-	s.PublicKeyPEM, err = litepub.PublicKeyToPEM(&s.PrivateKey.PublicKey)
-	if err != nil {
-		log.Fatal().Err(err).Msg("error deriving public key")
-		return
-	}
-
 	// logger
 	zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	log = log.With().Timestamp().Logger()
+	var err error
 
-	// postgres connection
-	pg, err = initDB(s.PostgresURL)
-	if err != nil {
-		log.Fatal().Err(err).Msg("couldn't connect to postgres")
+	if err = envconfig.Process("", &s); err != nil {
+		log.Fatal().Err(err).Msg("couldn't process envconfig.")
 		return
 	}
+	if err = s.generateKeys(); err != nil {
+		return
+	}
+	if pg, err = initDB(s.PostgresURL); err != nil {
+		return
+	}
+	cacheExpirer()
 
-	// cache expirer
-	go func() {
-		time.Sleep(2 * time.Hour)
-		pg.Exec("DELETE FROM cache WHERE expiration < now()")
-	}()
-
-	// define routes
-	relayer.Router.Path("/icon.svg").Methods("GET").HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "image/svg+xml")
-			fmt.Fprint(w, s.IconSVG)
-			return
-		})
-
-	relayer.Router.Path("/pub").Methods("POST").HandlerFunc(pubInbox)
-	relayer.Router.Path("/pub/user/{pubkey:[A-Fa-f0-9]{64}}").Methods("GET").HandlerFunc(pubUserActor)
-	relayer.Router.Path("/pub/user/{pubkey:[A-Fa-f0-9]{64}}/following").Methods("GET").HandlerFunc(pubUserFollowing)
-	relayer.Router.Path("/pub/user/{pubkey:[A-Fa-f0-9]{64}}/followers").Methods("GET").HandlerFunc(pubUserFollowers)
-	relayer.Router.Path("/pub/user/{pubkey:[A-Fa-f0-9]{64}}/outbox").Methods("GET").HandlerFunc(pubOutbox)
-	relayer.Router.Path("/pub/note/{id:[A-Fa-f0-9]{64}}").Methods("GET").HandlerFunc(pubNote)
-	relayer.Router.Path("/.well-known/webfinger").HandlerFunc(webfinger)
-	relayer.Router.Path("/.well-known/nostr.json").HandlerFunc(handleNip05)
-
-	relayer.Router.PathPrefix("/").Methods("GET").Handler(http.FileServer(http.Dir("./static")))
-
-	// start the relay/http server
-	relayer.Start(Relay{})
+	rl := Relay{}
+	if err = relayer.Start(&rl); err != nil {
+		log.Fatal().Err(err).Msg("!!server termiinate!!")
+	}
 }
